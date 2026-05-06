@@ -117,12 +117,17 @@ func (d *dynamodb) getBalance(accountID string) (float64, error) {
 // of the consumer that will be tested in the unit tests. in contrast, the
 // queue and database implementations are just for testing purposes and
 // will not be part of the actual consumer implementation.
-type lambdaFunction struct{}
+type lambdaFunction struct {
+	injectCrashAfterReceive bool
+}
 
 func (f *lambdaFunction) invoke(q queue, table database) error {
 	msg, err := q.receive()
 	if err != nil {
 		return err
+	}
+	if f.injectCrashAfterReceive {
+		return fmt.Errorf("simulated crash after receive")
 	}
 	opErr := f.update(msg.Operation, table)
 	if opErr != nil {
