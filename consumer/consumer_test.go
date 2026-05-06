@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const defaultVisibilityTimeout = 5 * time.Second
+const defaultVisibilityTimeout = 1 * time.Second
 
 func TestDeposit(t *testing.T) {
 	q := newSQSQueue(defaultVisibilityTimeout)
