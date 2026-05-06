@@ -45,7 +45,7 @@ func (q *failDeleteQueue) size() int {
 	return q.inner.size()
 }
 
-func (d *transientFailDB) applyOperation(op operation) error {
+func (d *transientFailDB) transactWriteItems(input transactWriteItemsInput) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -53,7 +53,7 @@ func (d *transientFailDB) applyOperation(op operation) error {
 		d.failUpdates--
 		return fmt.Errorf("transient dynamodb error")
 	}
-	return d.inner.applyOperation(op)
+	return d.inner.transactWriteItems(input)
 }
 
 func (d *transientFailDB) getBalance(accountID string) (float64, error) {
@@ -168,11 +168,25 @@ func TestConditionExpressionAffectsDuplicateHandling(t *testing.T) {
 	db := &dynamodb{balance: make(map[string]float64)}
 
 	// With condition expression, duplicate operation ID should be ignored.
-	err := db.updateItem(100.0, "account_cond", "op1", "attribute_not_exists(id)")
+	err := db.transactWriteItems(transactWriteItemsInput{
+		Put: putItemInput{
+			AccountID:           "account_cond",
+			OperationID:         "op1",
+			ConditionExpression: "attribute_not_exists(id)",
+		},
+		Update: updateItemInput{AccountID: "account_cond", Delta: 100.0},
+	})
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	err = db.updateItem(100.0, "account_cond", "op1", "attribute_not_exists(id)")
+	err = db.transactWriteItems(transactWriteItemsInput{
+		Put: putItemInput{
+			AccountID:           "account_cond",
+			OperationID:         "op1",
+			ConditionExpression: "attribute_not_exists(id)",
+		},
+		Update: updateItemInput{AccountID: "account_cond", Delta: 100.0},
+	})
 	if err == nil {
 		t.Fatalf("expected conditional check failure for duplicate operation")
 	}
@@ -189,11 +203,25 @@ func TestConditionExpressionAffectsDuplicateHandling(t *testing.T) {
 	}
 
 	// Without condition expression, duplicate operation ID should be applied twice.
-	err = db.updateItem(100.0, "account_uncond", "op1", "")
+	err = db.transactWriteItems(transactWriteItemsInput{
+		Put: putItemInput{
+			AccountID:           "account_uncond",
+			OperationID:         "op1",
+			ConditionExpression: "",
+		},
+		Update: updateItemInput{AccountID: "account_uncond", Delta: 100.0},
+	})
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	err = db.updateItem(100.0, "account_uncond", "op1", "")
+	err = db.transactWriteItems(transactWriteItemsInput{
+		Put: putItemInput{
+			AccountID:           "account_uncond",
+			OperationID:         "op1",
+			ConditionExpression: "",
+		},
+		Update: updateItemInput{AccountID: "account_uncond", Delta: 100.0},
+	})
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -210,7 +238,14 @@ func TestConditionExpressionAffectsDuplicateHandling(t *testing.T) {
 func TestUnknownConditionExpressionIsRefused(t *testing.T) {
 	db := &dynamodb{balance: make(map[string]float64)}
 
-	err := db.updateItem(100.0, "account1", "op1", "attribute_not_exists(unknown)")
+	err := db.transactWriteItems(transactWriteItemsInput{
+		Put: putItemInput{
+			AccountID:           "account1",
+			OperationID:         "op1",
+			ConditionExpression: "attribute_not_exists(unknown)",
+		},
+		Update: updateItemInput{AccountID: "account1", Delta: 100.0},
+	})
 	if err == nil {
 		t.Fatalf("expected error for unknown condition expression")
 	}

@@ -22,6 +22,22 @@ type message struct {
 	Operation     operation
 }
 
+type putItemInput struct {
+	AccountID           string
+	OperationID         string
+	ConditionExpression string
+}
+
+type updateItemInput struct {
+	AccountID string
+	Delta     float64
+}
+
+type transactWriteItemsInput struct {
+	Put    putItemInput
+	Update updateItemInput
+}
+
 // queue is the abstract interface for the message queue operations.
 type queue interface {
 	send(op operation) error
@@ -31,7 +47,7 @@ type queue interface {
 
 // database is the abstract interface for the database operations.
 type database interface {
-	applyOperation(op operation) error
+	transactWriteItems(input transactWriteItemsInput) error
 	getBalance(accountID string) (float64, error)
 }
 
@@ -141,12 +157,11 @@ type dynamodb struct {
 	mu        sync.Mutex
 }
 
-func (d *dynamodb) updateItem(amount float64, accountID,
-	operationID, conditionExpression string) error {
+func (d *dynamodb) transactWriteItems(input transactWriteItemsInput) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	switch conditionExpression {
+	switch input.Put.ConditionExpression {
 	case "":
 		// No condition expression means unconditional update.
 	case "attribute_not_exists(id)":
@@ -154,29 +169,18 @@ func (d *dynamodb) updateItem(amount float64, accountID,
 			d.processed = make(map[string]struct{})
 		}
 
-		key := fmt.Sprintf("%s:%s", accountID, operationID)
+		key := fmt.Sprintf("%s:%s", input.Put.AccountID, input.Put.OperationID)
 		if _, exists := d.processed[key]; exists {
 			return errConditionalCheckFailed
 		}
 
 		d.processed[key] = struct{}{}
 	default:
-		return fmt.Errorf("unsupported condition expression: %s", conditionExpression)
+		return fmt.Errorf("unsupported condition expression: %s", input.Put.ConditionExpression)
 	}
 
-	d.balance[accountID] += amount
+	d.balance[input.Update.AccountID] += input.Update.Delta
 	return nil
-}
-
-func (d *dynamodb) applyOperation(op operation) error {
-	switch op.OperationName {
-	case "deposit":
-		return d.updateItem(op.Amount, op.AccountID, op.ID, "attribute_not_exists(id)")
-	case "withdraw":
-		return d.updateItem(-op.Amount, op.AccountID, op.ID, "attribute_not_exists(id)")
-	default:
-		return fmt.Errorf("invalid operation name: %s", op.OperationName)
-	}
 }
 
 func (d *dynamodb) getBalance(accountID string) (float64, error) {
@@ -220,5 +224,25 @@ func (f *lambdaFunction) invoke(q queue, table database) error {
 }
 
 func (f *lambdaFunction) update(op operation, table database) error {
-	return table.applyOperation(op)
+	var delta float64
+	switch op.OperationName {
+	case "deposit":
+		delta = op.Amount
+	case "withdraw":
+		delta = -op.Amount
+	default:
+		return fmt.Errorf("invalid operation name: %s", op.OperationName)
+	}
+
+	return table.transactWriteItems(transactWriteItemsInput{
+		Put: putItemInput{
+			AccountID:           op.AccountID,
+			OperationID:         op.ID,
+			ConditionExpression: "attribute_not_exists(id)",
+		},
+		Update: updateItemInput{
+			AccountID: op.AccountID,
+			Delta:     delta,
+		},
+	})
 }
