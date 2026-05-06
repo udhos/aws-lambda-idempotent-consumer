@@ -326,25 +326,30 @@ func TestConcurrentUpdatesToSameAccountAreConsistent(t *testing.T) {
 }
 
 func TestConcurrentDuplicateOperationIDIsAppliedOnce(t *testing.T) {
-	const workers = 100
+	const duplicates = 100
 
+	q := newSQSQueue(defaultVisibilityTimeout)
 	db := &dynamodb{balance: make(map[string]float64)}
-	fn := &lambdaFunction{}
+
+	op := operation{
+		ID:            "h3-dup-op",
+		OperationName: "deposit",
+		Amount:        1.0,
+		AccountID:     "account_h3_dup",
+	}
+	for range duplicates {
+		q.send(op)
+	}
 
 	start := make(chan struct{})
-	errs := make(chan error, workers)
+	errs := make(chan error, duplicates)
 
 	var wg sync.WaitGroup
-	for range workers {
+	for range duplicates {
 		wg.Go(func() {
 			<-start
-			op := operation{
-				ID:            "h3-dup-op",
-				OperationName: "deposit",
-				Amount:        1.0,
-				AccountID:     "account_h3_dup",
-			}
-			errs <- fn.update(op, db)
+			fn := &lambdaFunction{}
+			errs <- fn.invoke(q, db)
 		})
 	}
 
@@ -356,6 +361,10 @@ func TestConcurrentDuplicateOperationIDIsAppliedOnce(t *testing.T) {
 		if err != nil {
 			t.Fatalf("expected no error, got %v", err)
 		}
+	}
+
+	if q.size() != 0 {
+		t.Fatalf("expected queue to be empty after processing duplicates, got %d messages", q.size())
 	}
 
 	balance, err := db.getBalance("account_h3_dup")
