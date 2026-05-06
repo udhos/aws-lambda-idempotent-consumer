@@ -75,3 +75,95 @@ func TestWithdraw(t *testing.T) {
 		t.Fatalf("expected balance to be 50.0, got %v", balance)
 	}
 }
+
+func TestDuplicateMessageIsProcessedOnce(t *testing.T) {
+	q := newSQSQueue(defaultVisibilityTimeout)
+	db := &dynamodb{balance: make(map[string]float64)}
+	fn := &lambdaFunction{}
+
+	op := operation{
+		ID:            "1",
+		OperationName: "deposit",
+		Amount:        100.0,
+		AccountID:     "account1",
+	}
+
+	// Simulate SQS duplicating the same message.
+	q.send(op)
+	q.send(op)
+
+	err := fn.invoke(q, db)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	err = fn.invoke(q, db)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	balance, err := db.getBalance("account1")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if balance != 100.0 {
+		t.Fatalf("expected balance to be 100.0 after duplicate message, got %v", balance)
+	}
+}
+
+func TestConditionExpressionAffectsDuplicateHandling(t *testing.T) {
+	db := &dynamodb{balance: make(map[string]float64)}
+
+	// With condition expression, duplicate operation ID should be ignored.
+	err := db.updateItem(100.0, "account_cond", "op1", "attribute_not_exists(id)")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	err = db.updateItem(100.0, "account_cond", "op1", "attribute_not_exists(id)")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	conditionedBalance, err := db.getBalance("account_cond")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if conditionedBalance != 100.0 {
+		t.Fatalf("expected conditioned balance to be 100.0, got %v", conditionedBalance)
+	}
+
+	// Without condition expression, duplicate operation ID should be applied twice.
+	err = db.updateItem(100.0, "account_uncond", "op1", "")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	err = db.updateItem(100.0, "account_uncond", "op1", "")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	unconditionedBalance, err := db.getBalance("account_uncond")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if unconditionedBalance != 200.0 {
+		t.Fatalf("expected unconditioned balance to be 200.0, got %v", unconditionedBalance)
+	}
+}
+
+func TestUnknownConditionExpressionIsRefused(t *testing.T) {
+	db := &dynamodb{balance: make(map[string]float64)}
+
+	err := db.updateItem(100.0, "account1", "op1", "attribute_not_exists(unknown)")
+	if err == nil {
+		t.Fatalf("expected error for unknown condition expression")
+	}
+
+	balance, err := db.getBalance("account1")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if balance != 0.0 {
+		t.Fatalf("expected balance to remain 0.0, got %v", balance)
+	}
+}

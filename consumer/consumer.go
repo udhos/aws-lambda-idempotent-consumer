@@ -27,7 +27,7 @@ type queue interface {
 
 // database is the abstract interface for the database operations.
 type database interface {
-	updateItem(amount float64, accountID, conditionExpression string) error
+	updateItem(amount float64, accountID, operationID, conditionExpression string) error
 	getBalance(accountID string) (float64, error)
 }
 
@@ -98,11 +98,30 @@ func (q *sqsQueue) delete(receiptHandle string) error {
 
 // dynamodb is a simple in-memory implementation of the database interface for testing purposes.
 type dynamodb struct {
-	balance map[string]float64 // accountID -> balance
+	balance   map[string]float64  // accountID -> balance
+	processed map[string]struct{} // accountID:operationID -> seen
 }
 
 func (d *dynamodb) updateItem(amount float64, accountID,
-	conditionExpression string) error {
+	operationID, conditionExpression string) error {
+	switch conditionExpression {
+	case "":
+		// No condition expression means unconditional update.
+	case "attribute_not_exists(id)":
+		if d.processed == nil {
+			d.processed = make(map[string]struct{})
+		}
+
+		key := fmt.Sprintf("%s:%s", accountID, operationID)
+		if _, exists := d.processed[key]; exists {
+			return nil
+		}
+
+		d.processed[key] = struct{}{}
+	default:
+		return fmt.Errorf("unsupported condition expression: %s", conditionExpression)
+	}
+
 	d.balance[accountID] += amount
 	return nil
 }
@@ -143,9 +162,9 @@ func (f *lambdaFunction) invoke(q queue, table database) error {
 func (f *lambdaFunction) update(op operation, table database) error {
 	switch op.OperationName {
 	case "deposit":
-		return table.updateItem(op.Amount, op.AccountID, "attribute_not_exists(id)")
+		return table.updateItem(op.Amount, op.AccountID, op.ID, "attribute_not_exists(id)")
 	case "withdraw":
-		return table.updateItem(-op.Amount, op.AccountID, "attribute_not_exists(id)")
+		return table.updateItem(-op.Amount, op.AccountID, op.ID, "attribute_not_exists(id)")
 	default:
 		return fmt.Errorf("invalid operation name: %s", op.OperationName)
 	}

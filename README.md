@@ -4,16 +4,16 @@
 
 # Hurdles
 
-- SQS might duplicate messages.
-- Lambda failure might cause message to be reissued by SQS and processed again by Lambda.
-- DynamoDB might have concurrent updates to the same item.
-- DynamoDB might have transient errors.
-- Lambda might have transient errors (e.g. function might crash).
-- Lambda might timeout.
-- Concurrent Lambdas might process different messages at the same time.
-- Concurrent Lambdas might process the same message at the same time.
-- The solution cannot apply the same operation twice to the database (e.g. double deposit to the same account).
-- The solution cannot lose messages (e.g. deposit not applied to the account).
+1. SQS might duplicate messages.
+2. Lambda failure might cause message to be reissued by SQS and processed again by Lambda.
+3. DynamoDB might have concurrent updates to the same item.
+4. DynamoDB might have transient errors.
+5. Lambda might have transient errors (e.g. function might crash).
+6. Lambda might timeout.
+7. Concurrent Lambdas might process different messages at the same time.
+8. Concurrent Lambdas might process the same message at the same time.
+9. The solution cannot apply the same operation twice to the database (e.g. double deposit to the same account).
+10. The solution cannot lose messages (e.g. deposit not applied to the account).
 
 # Event format
 
