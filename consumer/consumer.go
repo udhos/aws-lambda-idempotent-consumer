@@ -40,6 +40,7 @@ type function interface {
 type sqsMessage struct {
 	VisibleAfter time.Time
 	Message      message
+	ReceiveCount int
 }
 
 func (m sqsMessage) isVisible() bool {
@@ -52,6 +53,7 @@ type sqsQueue struct {
 	queue             map[string]sqsMessage // receiptHandle -> message
 	visibilityTimeout time.Duration
 	nextReceiptHandle int
+	mu                sync.Mutex
 }
 
 func newSQSQueue(visibilityTimeout time.Duration) *sqsQueue {
@@ -62,6 +64,9 @@ func newSQSQueue(visibilityTimeout time.Duration) *sqsQueue {
 }
 
 func (q *sqsQueue) send(op operation) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	// Implementation to send a message to SQS
 	msg := message{
 		ReceiptHandle: fmt.Sprintf("%d", q.nextReceiptHandle),
@@ -71,14 +76,20 @@ func (q *sqsQueue) send(op operation) error {
 	q.queue[msg.ReceiptHandle] = sqsMessage{
 		Message:      msg,
 		VisibleAfter: time.Now(), // Message is immediately visible
+		ReceiveCount: 0,
 	}
 	return nil
 }
 
 func (q *sqsQueue) receive() (message, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	// find the first visible message
 	for _, sqsMsg := range q.queue {
 		if sqsMsg.isVisible() {
+			sqsMsg.ReceiveCount++
+
 			// Mark the message as invisible for a certain duration (e.g., 30 seconds)
 			sqsMsg.VisibleAfter = time.Now().Add(q.visibilityTimeout)
 
@@ -92,9 +103,32 @@ func (q *sqsQueue) receive() (message, error) {
 }
 
 func (q *sqsQueue) delete(receiptHandle string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	// Implementation to delete a message from SQS
 	delete(q.queue, receiptHandle)
 	return nil
+}
+
+func (q *sqsQueue) receiveCountByOperationID(operationID string) int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	count := 0
+	for _, sqsMsg := range q.queue {
+		if sqsMsg.Message.Operation.ID == operationID {
+			count += sqsMsg.ReceiveCount
+		}
+	}
+	return count
+}
+
+func (q *sqsQueue) size() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	return len(q.queue)
 }
 
 // dynamodb is a simple in-memory implementation of the database interface for testing purposes.

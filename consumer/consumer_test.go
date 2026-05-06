@@ -12,9 +12,13 @@ const defaultVisibilityTimeout = 1 * time.Second
 type transientFailDB struct {
 	inner       *dynamodb
 	failUpdates int
+	mu          sync.Mutex
 }
 
 func (d *transientFailDB) updateItem(amount float64, accountID, operationID, conditionExpression string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	if d.failUpdates > 0 {
 		d.failUpdates--
 		return fmt.Errorf("transient dynamodb error")
@@ -230,8 +234,8 @@ func TestLambdaFailureCausesReissueAndRetryProcessesMessage(t *testing.T) {
 		t.Fatalf("expected balance to be 100.0 after retry, got %v", balance)
 	}
 
-	if len(q.queue) != 0 {
-		t.Fatalf("expected queue to be empty after successful retry, got %d messages", len(q.queue))
+	if q.size() != 0 {
+		t.Fatalf("expected queue to be empty after successful retry, got %d messages", q.size())
 	}
 }
 
@@ -272,8 +276,8 @@ func TestTransientDynamoDBErrorCausesRetryThenSuccess(t *testing.T) {
 		t.Fatalf("expected balance to be 100.0 after retry, got %v", balance)
 	}
 
-	if len(q.queue) != 0 {
-		t.Fatalf("expected queue to be empty after successful retry, got %d messages", len(q.queue))
+	if q.size() != 0 {
+		t.Fatalf("expected queue to be empty after successful retry, got %d messages", q.size())
 	}
 }
 
@@ -409,7 +413,105 @@ func TestTimeoutBeforeDeleteCausesReissueWithoutDoubleApply(t *testing.T) {
 		t.Fatalf("expected balance to remain 100.0 after retry, got %v", balance)
 	}
 
-	if len(q.queue) != 0 {
-		t.Fatalf("expected queue to be empty after successful retry, got %d messages", len(q.queue))
+	if q.size() != 0 {
+		t.Fatalf("expected queue to be empty after successful retry, got %d messages", q.size())
+	}
+}
+
+func TestMessageIsNotLostByFunctionDuringRetries(t *testing.T) {
+	visibilityTimeout := 20 * time.Millisecond
+	q := newSQSQueue(visibilityTimeout)
+	baseDB := &dynamodb{balance: make(map[string]float64)}
+	db := &transientFailDB{inner: baseDB, failUpdates: 3}
+	fn := &lambdaFunction{}
+
+	op := operation{
+		ID:            "h10-1",
+		OperationName: "deposit",
+		Amount:        100.0,
+		AccountID:     "account_h10",
+	}
+
+	q.send(op)
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		err := fn.invoke(q, db)
+		if err == nil {
+			t.Fatalf("expected transient error on attempt %d, got nil", attempt)
+		}
+
+		if q.size() != 1 {
+			t.Fatalf("expected message to remain in queue after failed attempt %d, got %d messages", attempt, q.size())
+		}
+
+		receiveCount := q.receiveCountByOperationID(op.ID)
+		if receiveCount != attempt {
+			t.Fatalf("expected receive count %d after failed attempt, got %d", attempt, receiveCount)
+		}
+
+		time.Sleep(visibilityTimeout + 10*time.Millisecond)
+	}
+
+	err := fn.invoke(q, db)
+	if err != nil {
+		t.Fatalf("expected success after transient failures, got %v", err)
+	}
+
+	if q.size() != 0 {
+		t.Fatalf("expected queue to be empty after successful processing, got %d messages", q.size())
+	}
+
+	balance, err := db.getBalance("account_h10")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if balance != 100.0 {
+		t.Fatalf("expected balance to be 100.0 after retries, got %v", balance)
+	}
+}
+
+func TestConcurrentRetriesDoNotLoseMessage(t *testing.T) {
+	visibilityTimeout := 20 * time.Millisecond
+	q := newSQSQueue(visibilityTimeout)
+	baseDB := &dynamodb{balance: make(map[string]float64)}
+	db := &transientFailDB{inner: baseDB, failUpdates: 8}
+
+	op := operation{
+		ID:            "h10-concurrent-1",
+		OperationName: "deposit",
+		Amount:        100.0,
+		AccountID:     "account_h10_concurrent",
+	}
+	q.send(op)
+
+	const workers = 8
+	const attemptsPerWorker = 12
+	start := make(chan struct{})
+
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			<-start
+			fn := &lambdaFunction{}
+			for range attemptsPerWorker {
+				_ = fn.invoke(q, db)
+				time.Sleep(visibilityTimeout + 2*time.Millisecond)
+			}
+		})
+	}
+
+	close(start)
+	wg.Wait()
+
+	if q.size() != 0 {
+		t.Fatalf("expected queue to be empty after concurrent retries converge, got %d messages", q.size())
+	}
+
+	balance, err := db.getBalance("account_h10_concurrent")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if balance != 100.0 {
+		t.Fatalf("expected balance to be 100.0 after concurrent retries, got %v", balance)
 	}
 }
