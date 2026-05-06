@@ -46,6 +46,7 @@ func (m sqsMessage) isVisible() bool {
 	return now.After(m.VisibleAfter)
 }
 
+// sqsQueue is a simple in-memory implementation of the queue interface for testing purposes.
 type sqsQueue struct {
 	queue             map[string]sqsMessage // receiptHandle -> message
 	visibilityTimeout time.Duration
@@ -95,6 +96,7 @@ func (q *sqsQueue) delete(receiptHandle string) error {
 	return nil
 }
 
+// dynamodb is a simple in-memory implementation of the database interface for testing purposes.
 type dynamodb struct {
 	balance map[string]float64 // accountID -> balance
 }
@@ -109,6 +111,12 @@ func (d *dynamodb) getBalance(accountID string) (float64, error) {
 	return d.balance[accountID], nil
 }
 
+// lambdaFunction is the implementation of the function interface that will
+// be invoked for each operation. this is where the business logic for
+// processing the operations will be implemented. this is the main component
+// of the consumer that will be tested in the unit tests. in contrast, the
+// queue and database implementations are just for testing purposes and
+// will not be part of the actual consumer implementation.
 type lambdaFunction struct{}
 
 func (f *lambdaFunction) invoke(q queue, table database) error {
