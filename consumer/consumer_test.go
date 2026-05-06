@@ -15,6 +15,36 @@ type transientFailDB struct {
 	mu          sync.Mutex
 }
 
+type failDeleteQueue struct {
+	inner       *sqsQueue
+	failDeletes int
+	mu          sync.Mutex
+}
+
+func (q *failDeleteQueue) send(op operation) error {
+	return q.inner.send(op)
+}
+
+func (q *failDeleteQueue) receive() (message, error) {
+	return q.inner.receive()
+}
+
+func (q *failDeleteQueue) delete(receiptHandle string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if q.failDeletes > 0 {
+		q.failDeletes--
+		return fmt.Errorf("simulated delete failure")
+	}
+
+	return q.inner.delete(receiptHandle)
+}
+
+func (q *failDeleteQueue) size() int {
+	return q.inner.size()
+}
+
 func (d *transientFailDB) updateItem(amount float64, accountID, operationID, conditionExpression string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -575,5 +605,58 @@ func TestConcurrentRetriesDoNotLoseMessage(t *testing.T) {
 	}
 	if balance != 100.0 {
 		t.Fatalf("expected balance to be 100.0 after concurrent retries, got %v", balance)
+	}
+}
+
+func TestDeleteFailureCausesRetryWithoutDoubleApply(t *testing.T) {
+	visibilityTimeout := 20 * time.Millisecond
+	baseQueue := newSQSQueue(visibilityTimeout)
+	q := &failDeleteQueue{inner: baseQueue, failDeletes: 1}
+	db := &dynamodb{balance: make(map[string]float64)}
+	fn := &lambdaFunction{}
+
+	op := operation{
+		ID:            "delete-fail-1",
+		OperationName: "deposit",
+		Amount:        100.0,
+		AccountID:     "account_delete_fail",
+	}
+	q.send(op)
+
+	// First attempt commits the update but fails to delete the message.
+	err := fn.invoke(q, db)
+	if err == nil {
+		t.Fatalf("expected delete failure, got nil")
+	}
+
+	if q.size() != 1 {
+		t.Fatalf("expected message to remain in queue after delete failure, got %d", q.size())
+	}
+
+	balance, err := db.getBalance("account_delete_fail")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if balance != 100.0 {
+		t.Fatalf("expected balance to be 100.0 after first attempt, got %v", balance)
+	}
+
+	// Retry should succeed and idempotency must prevent double apply.
+	time.Sleep(visibilityTimeout + 10*time.Millisecond)
+	err = fn.invoke(q, db)
+	if err != nil {
+		t.Fatalf("expected no error on retry after delete failure, got %v", err)
+	}
+
+	if q.size() != 0 {
+		t.Fatalf("expected queue to be empty after successful retry, got %d", q.size())
+	}
+
+	balance, err = db.getBalance("account_delete_fail")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if balance != 100.0 {
+		t.Fatalf("expected balance to remain 100.0 after retry, got %v", balance)
 	}
 }
