@@ -362,3 +362,54 @@ func TestConcurrentDuplicateOperationIDIsAppliedOnce(t *testing.T) {
 		t.Fatalf("expected balance to be 1.0 with duplicate operation ID, got %v", balance)
 	}
 }
+
+func TestTimeoutBeforeDeleteCausesReissueWithoutDoubleApply(t *testing.T) {
+	visibilityTimeout := 20 * time.Millisecond
+	q := newSQSQueue(visibilityTimeout)
+	db := &dynamodb{balance: make(map[string]float64)}
+	fn := &lambdaFunction{injectTimeoutBeforeDelete: true}
+
+	op := operation{
+		ID:            "h6-1",
+		OperationName: "deposit",
+		Amount:        100.0,
+		AccountID:     "account_h6",
+	}
+
+	q.send(op)
+
+	// First invocation times out after update but before delete.
+	err := fn.invoke(q, db)
+	if err == nil {
+		t.Fatalf("expected timeout error, got nil")
+	}
+
+	// The operation should already have been applied once.
+	balance, err := db.getBalance("account_h6")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if balance != 100.0 {
+		t.Fatalf("expected balance to be 100.0 after timeout, got %v", balance)
+	}
+
+	// After visibility timeout, the message is reissued; idempotency prevents double apply.
+	fn.injectTimeoutBeforeDelete = false
+	time.Sleep(visibilityTimeout + 10*time.Millisecond)
+	err = fn.invoke(q, db)
+	if err != nil {
+		t.Fatalf("expected no error on retry after timeout, got %v", err)
+	}
+
+	balance, err = db.getBalance("account_h6")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if balance != 100.0 {
+		t.Fatalf("expected balance to remain 100.0 after retry, got %v", balance)
+	}
+
+	if len(q.queue) != 0 {
+		t.Fatalf("expected queue to be empty after successful retry, got %d messages", len(q.queue))
+	}
+}

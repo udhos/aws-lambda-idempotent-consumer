@@ -145,7 +145,8 @@ func (d *dynamodb) getBalance(accountID string) (float64, error) {
 // queue and database implementations are just for testing purposes and
 // will not be part of the actual consumer implementation.
 type lambdaFunction struct {
-	injectCrashAfterReceive bool
+	injectCrashAfterReceive   bool
+	injectTimeoutBeforeDelete bool
 }
 
 func (f *lambdaFunction) invoke(q queue, table database) error {
@@ -159,6 +160,9 @@ func (f *lambdaFunction) invoke(q queue, table database) error {
 	opErr := f.update(msg.Operation, table)
 	if opErr != nil {
 		return opErr
+	}
+	if f.injectTimeoutBeforeDelete {
+		return fmt.Errorf("simulated timeout before delete")
 	}
 	errDelete := q.delete(msg.ReceiptHandle)
 	if errDelete != nil {
