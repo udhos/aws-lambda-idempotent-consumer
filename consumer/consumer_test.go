@@ -376,6 +376,59 @@ func TestConcurrentDuplicateOperationIDIsAppliedOnce(t *testing.T) {
 	}
 }
 
+func TestConcurrentLambdasProcessDifferentMessages(t *testing.T) {
+	const workers = 100
+
+	q := newSQSQueue(defaultVisibilityTimeout)
+	db := &dynamodb{balance: make(map[string]float64)}
+
+	for i := range workers {
+		op := operation{
+			ID:            fmt.Sprintf("h7-%d", i),
+			OperationName: "deposit",
+			Amount:        1.0,
+			AccountID:     fmt.Sprintf("account_h7_%d", i),
+		}
+		q.send(op)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			<-start
+			fn := &lambdaFunction{}
+			errs <- fn.invoke(q, db)
+		})
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+	}
+
+	if q.size() != 0 {
+		t.Fatalf("expected queue to be empty after concurrent processing, got %d messages", q.size())
+	}
+
+	for i := range workers {
+		balance, err := db.getBalance(fmt.Sprintf("account_h7_%d", i))
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if balance != 1.0 {
+			t.Fatalf("expected account %d balance to be 1.0, got %v", i, balance)
+		}
+	}
+}
+
 func TestTimeoutBeforeDeleteCausesReissueWithoutDoubleApply(t *testing.T) {
 	visibilityTimeout := 20 * time.Millisecond
 	q := newSQSQueue(visibilityTimeout)
