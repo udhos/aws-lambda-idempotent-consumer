@@ -1,11 +1,29 @@
 package consumer
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
 
 const defaultVisibilityTimeout = 1 * time.Second
+
+type transientFailDB struct {
+	inner       *dynamodb
+	failUpdates int
+}
+
+func (d *transientFailDB) updateItem(amount float64, accountID, operationID, conditionExpression string) error {
+	if d.failUpdates > 0 {
+		d.failUpdates--
+		return fmt.Errorf("transient dynamodb error")
+	}
+	return d.inner.updateItem(amount, accountID, operationID, conditionExpression)
+}
+
+func (d *transientFailDB) getBalance(accountID string) (float64, error) {
+	return d.inner.getBalance(accountID)
+}
 
 func TestDeposit(t *testing.T) {
 	q := newSQSQueue(defaultVisibilityTimeout)
@@ -204,6 +222,48 @@ func TestLambdaFailureCausesReissueAndRetryProcessesMessage(t *testing.T) {
 	}
 
 	balance, err := db.getBalance("account_h2")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if balance != 100.0 {
+		t.Fatalf("expected balance to be 100.0 after retry, got %v", balance)
+	}
+
+	if len(q.queue) != 0 {
+		t.Fatalf("expected queue to be empty after successful retry, got %d messages", len(q.queue))
+	}
+}
+
+func TestTransientDynamoDBErrorCausesRetryThenSuccess(t *testing.T) {
+	visibilityTimeout := 20 * time.Millisecond
+	q := newSQSQueue(visibilityTimeout)
+	baseDB := &dynamodb{balance: make(map[string]float64)}
+	db := &transientFailDB{inner: baseDB, failUpdates: 1}
+	fn := &lambdaFunction{}
+
+	op := operation{
+		ID:            "h4-1",
+		OperationName: "deposit",
+		Amount:        100.0,
+		AccountID:     "account_h4",
+	}
+
+	q.send(op)
+
+	// First attempt fails with a transient DynamoDB error, so message is not deleted.
+	err := fn.invoke(q, db)
+	if err == nil {
+		t.Fatalf("expected transient DynamoDB error, got nil")
+	}
+
+	// Message should become available again after visibility timeout and then succeed.
+	time.Sleep(visibilityTimeout + 10*time.Millisecond)
+	err = fn.invoke(q, db)
+	if err != nil {
+		t.Fatalf("expected no error on retry, got %v", err)
+	}
+
+	balance, err := db.getBalance("account_h4")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
