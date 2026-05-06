@@ -320,3 +320,45 @@ func TestConcurrentUpdatesToSameAccountAreConsistent(t *testing.T) {
 		t.Fatalf("expected balance to be %d, got %v", workers, balance)
 	}
 }
+
+func TestConcurrentDuplicateOperationIDIsAppliedOnce(t *testing.T) {
+	const workers = 100
+
+	db := &dynamodb{balance: make(map[string]float64)}
+	fn := &lambdaFunction{}
+
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			<-start
+			op := operation{
+				ID:            "h3-dup-op",
+				OperationName: "deposit",
+				Amount:        1.0,
+				AccountID:     "account_h3_dup",
+			}
+			errs <- fn.update(op, db)
+		})
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+	}
+
+	balance, err := db.getBalance("account_h3_dup")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if balance != 1.0 {
+		t.Fatalf("expected balance to be 1.0 with duplicate operation ID, got %v", balance)
+	}
+}
