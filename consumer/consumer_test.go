@@ -45,7 +45,7 @@ func (q *failDeleteQueue) size() int {
 	return q.inner.size()
 }
 
-func (d *transientFailDB) updateItem(amount float64, accountID, operationID, conditionExpression string) error {
+func (d *transientFailDB) applyOperation(op operation) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -53,7 +53,7 @@ func (d *transientFailDB) updateItem(amount float64, accountID, operationID, con
 		d.failUpdates--
 		return fmt.Errorf("transient dynamodb error")
 	}
-	return d.inner.updateItem(amount, accountID, operationID, conditionExpression)
+	return d.inner.applyOperation(op)
 }
 
 func (d *transientFailDB) getBalance(accountID string) (float64, error) {
@@ -173,8 +173,11 @@ func TestConditionExpressionAffectsDuplicateHandling(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 	err = db.updateItem(100.0, "account_cond", "op1", "attribute_not_exists(id)")
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
+	if err == nil {
+		t.Fatalf("expected conditional check failure for duplicate operation")
+	}
+	if err != errConditionalCheckFailed {
+		t.Fatalf("expected errConditionalCheckFailed, got %v", err)
 	}
 
 	conditionedBalance, err := db.getBalance("account_cond")

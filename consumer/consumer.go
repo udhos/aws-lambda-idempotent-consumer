@@ -2,10 +2,13 @@
 package consumer
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 )
+
+var errConditionalCheckFailed = errors.New("conditional check failed")
 
 type operation struct {
 	ID            string  `json:"id"`
@@ -28,7 +31,7 @@ type queue interface {
 
 // database is the abstract interface for the database operations.
 type database interface {
-	updateItem(amount float64, accountID, operationID, conditionExpression string) error
+	applyOperation(op operation) error
 	getBalance(accountID string) (float64, error)
 }
 
@@ -153,7 +156,7 @@ func (d *dynamodb) updateItem(amount float64, accountID,
 
 		key := fmt.Sprintf("%s:%s", accountID, operationID)
 		if _, exists := d.processed[key]; exists {
-			return nil
+			return errConditionalCheckFailed
 		}
 
 		d.processed[key] = struct{}{}
@@ -163,6 +166,17 @@ func (d *dynamodb) updateItem(amount float64, accountID,
 
 	d.balance[accountID] += amount
 	return nil
+}
+
+func (d *dynamodb) applyOperation(op operation) error {
+	switch op.OperationName {
+	case "deposit":
+		return d.updateItem(op.Amount, op.AccountID, op.ID, "attribute_not_exists(id)")
+	case "withdraw":
+		return d.updateItem(-op.Amount, op.AccountID, op.ID, "attribute_not_exists(id)")
+	default:
+		return fmt.Errorf("invalid operation name: %s", op.OperationName)
+	}
 }
 
 func (d *dynamodb) getBalance(accountID string) (float64, error) {
@@ -192,7 +206,7 @@ func (f *lambdaFunction) invoke(q queue, table database) error {
 		return fmt.Errorf("simulated crash after receive")
 	}
 	opErr := f.update(msg.Operation, table)
-	if opErr != nil {
+	if opErr != nil && !errors.Is(opErr, errConditionalCheckFailed) {
 		return opErr
 	}
 	if f.injectTimeoutBeforeDelete {
@@ -206,12 +220,5 @@ func (f *lambdaFunction) invoke(q queue, table database) error {
 }
 
 func (f *lambdaFunction) update(op operation, table database) error {
-	switch op.OperationName {
-	case "deposit":
-		return table.updateItem(op.Amount, op.AccountID, op.ID, "attribute_not_exists(id)")
-	case "withdraw":
-		return table.updateItem(-op.Amount, op.AccountID, op.ID, "attribute_not_exists(id)")
-	default:
-		return fmt.Errorf("invalid operation name: %s", op.OperationName)
-	}
+	return table.applyOperation(op)
 }
