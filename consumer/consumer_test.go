@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -273,5 +274,49 @@ func TestTransientDynamoDBErrorCausesRetryThenSuccess(t *testing.T) {
 
 	if len(q.queue) != 0 {
 		t.Fatalf("expected queue to be empty after successful retry, got %d messages", len(q.queue))
+	}
+}
+
+func TestConcurrentUpdatesToSameAccountAreConsistent(t *testing.T) {
+	const workers = 100
+
+	db := &dynamodb{balance: make(map[string]float64)}
+	fn := &lambdaFunction{}
+
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			op := operation{
+				ID:            fmt.Sprintf("h3-%d", i),
+				OperationName: "deposit",
+				Amount:        1.0,
+				AccountID:     "account_h3",
+			}
+			errs <- fn.update(op, db)
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+	}
+
+	balance, err := db.getBalance("account_h3")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if balance != workers {
+		t.Fatalf("expected balance to be %d, got %v", workers, balance)
 	}
 }

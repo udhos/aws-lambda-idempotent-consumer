@@ -3,6 +3,7 @@ package consumer
 
 import (
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -100,10 +101,14 @@ func (q *sqsQueue) delete(receiptHandle string) error {
 type dynamodb struct {
 	balance   map[string]float64  // accountID -> balance
 	processed map[string]struct{} // accountID:operationID -> seen
+	mu        sync.Mutex
 }
 
 func (d *dynamodb) updateItem(amount float64, accountID,
 	operationID, conditionExpression string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	switch conditionExpression {
 	case "":
 		// No condition expression means unconditional update.
@@ -127,6 +132,9 @@ func (d *dynamodb) updateItem(amount float64, accountID,
 }
 
 func (d *dynamodb) getBalance(accountID string) (float64, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	return d.balance[accountID], nil
 }
 
